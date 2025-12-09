@@ -5,7 +5,7 @@
 # - Bigger/easier Back button on New Entry
 # - Categories actions (Rename / Clear / Cancel) fully wired
 # - Colour picker remains fixed-palette (no custom hex entry)
-# - New FilterView for advanced filtering (name, dates, colour, completed)
+# - New FilterView for advanced filtering (name, dates, colour, completed)h
 #Current theme colour: #D4AF37
 
 import ui
@@ -88,7 +88,6 @@ _PALETTE = [
     ('Purple', '#AF52DE'),
     ('Pink',   '#FF2D55'),
     ('Gray',   '#8E8E93'),
-    ('Black',  '#000000'),
 ]
 
 HEX_RE = re.compile(r'^\s*#?([0-9a-fA-F]{6})\s*$')
@@ -164,16 +163,11 @@ def _fmt_dt_for_label(iso_str):
     if not (iso_str or '').strip():
         return 'Not set'
     dt = parse_iso_or_now(iso_str)
-    today = datetime.now().date()
-    d = dt.date()
-    if d == today:
-        day = 'Today'
-    elif d == today + timedelta(days=1):
-        day = 'Tomorrow'
-    else:
-        day = dt.strftime('%a %d %b %Y')
-    t = dt.strftime('%I:%M %p').lstrip('0')
-    return f'{day} {t}'
+
+    time_part = dt.strftime('%I:%M %p').lstrip('0')   # 9:05 PM
+    date_part = dt.strftime('%d/%m/%Y')               # 07/12/2025
+
+    return f'{time_part} - {date_part}'
 
 
 # -------------------------
@@ -853,16 +847,19 @@ class DateTimePicker(ui.View):
       on_result    : Callback(result)
 
     Use by pushing into a NavigationView, or present() directly.
+
+    NOTE: When "All day" is turned on, the selected time is normalised
+    to 00:00. You can treat hour == 0 and minute == 0 as an "all-day"
+    item elsewhere in your code (filters, etc.).
     """
 
     class _ListDataSource(object):
         """
-        Simple list data source for month/year popup.
+        Simple list data source for the month/year/time popups.
 
         values      : list of items
         on_select   : callback(value)
         format_func : optional function(value) -> string
-                      used to show month names instead of numbers
         """
         def __init__(self, values, on_select, format_func=None):
             self.values = list(values or [])
@@ -913,639 +910,19 @@ class DateTimePicker(ui.View):
         self.mode = mode if mode in ('date', 'datetime') else 'datetime'
         self.minute_step = max(1, int(minute_step or 1))
 
-        # Parse dates using helpers
+        # Parse base dt
         base_dt = parse_iso_or_now(initial_iso)
         base_dt = base_dt.replace(second=0, microsecond=0)
-        # Snap minutes to step
         base_dt = base_dt.replace(minute=_round_minutes(base_dt.minute, self.minute_step))
-
         self.selected_dt = base_dt
         self.view_year = base_dt.year
         self.view_month = base_dt.month
 
-        self.min_dt = None
-        if min_iso:
-            try:
-                self.min_dt = parse_iso_or_now(min_iso)
-            except Exception:
-                self.min_dt = None
-
-        # Month/year popup state
-        self.month_year_popup = None
-        self.month_table = None
-        self.year_table = None
-        self.month_ds = None
-        self.year_ds = None
-
-        # Navigation bar buttons
-        left_items = [ui.ButtonItem(title='Cancel', action=self._cancel)]
-        right_items = []
-        if self.allow_clear:
-            right_items.append(ui.ButtonItem(title='Clear', action=self._clear))
-        right_items.append(ui.ButtonItem(title='Save', action=self._save))
-        self.left_button_items = left_items
-        self.right_button_items = right_items
-
-        # Header: month/year navigation
-        y = 0
-        self.header = ui.View(frame=(0, y, self.width, 52), flex='W')
-        self.header.background_color = (0.12, 0.12, 0.14)
-        self.add_subview(self.header)
-
-        # Year navigation buttons (double arrows)
-        self.prev_year_btn = ui.Button(frame=(8, 10, 36, 32))
-        self.prev_year_btn.title = '≪'
-        self.prev_year_btn.tint_color = 'white'
-        self.prev_year_btn.background_color = (0.18, 0.18, 0.2)
-        self.prev_year_btn.corner_radius = 8
-        self.prev_year_btn.action = self._prev_year
-        self.header.add_subview(self.prev_year_btn)
-
-        self.next_year_btn = ui.Button(frame=(self.width - 44, 10, 36, 32), flex='L')
-        self.next_year_btn.title = '≫'
-        self.next_year_btn.tint_color = 'white'
-        self.next_year_btn.background_color = (0.18, 0.18, 0.2)
-        self.next_year_btn.corner_radius = 8
-        self.next_year_btn.action = self._next_year
-        self.header.add_subview(self.next_year_btn)
-
-        # Month navigation buttons (single arrows)
-        self.prev_month_btn = ui.Button(frame=(0, 10, 32, 32))
-        self.prev_month_btn.title = '◀︎'
-        self.prev_month_btn.tint_color = 'white'
-        self.prev_month_btn.background_color = (0.18, 0.18, 0.2)
-        self.prev_month_btn.corner_radius = 8
-        self.prev_month_btn.action = self._prev_month
-        self.header.add_subview(self.prev_month_btn)
-
-        self.next_month_btn = ui.Button(frame=(0, 10, 32, 32))
-        self.next_month_btn.title = '▶︎'
-        self.next_month_btn.tint_color = 'white'
-        self.next_month_btn.background_color = (0.18, 0.18, 0.2)
-        self.next_month_btn.corner_radius = 8
-        self.next_month_btn.action = self._next_month
-        self.header.add_subview(self.next_month_btn)
-
-        # Position header buttons
-        self._layout_header_buttons()
-
-        # Month-year button in the centre (tappable to open popup)
-        self.month_btn = ui.Button(frame=(0, 10, self.width, 32), flex='W')
-        self.month_btn.background_color = (0, 0, 0, 0)
-        self.month_btn.tint_color = 'white'
-        self.month_btn.font = ('<System-Bold>', 17)
-        self.month_btn.action = self._toggle_month_year_popup
-        self.header.add_subview(self.month_btn)
-
-        y += self.header.height
-
-        # Weekday row
-        self.weekdays_view = ui.View(frame=(0, y, self.width, 22), flex='W')
-        self.add_subview(self.weekdays_view)
-        y += self.weekdays_view.height
-
-        # Calendar grid
-        self.calendar_view = ui.View(frame=(0, y, self.width, 6 * 40), flex='W')
-        self.add_subview(self.calendar_view)
-        y += self.calendar_view.height + 8
-
-        # Selected summary label
-        self.summary_lbl = ui.Label(frame=(16, y, self.width - 32, 24), flex='W')
-        self.summary_lbl.text_color = (0.85, 0.85, 0.9)
-        self.summary_lbl.font = ('<System>', 14)
-        self.summary_lbl.alignment = ui.ALIGN_CENTER
-        self.add_subview(self.summary_lbl)
-        y += 32
-
-        # Time button (only for datetime mode)
-        self.time_btn = ui.Button(frame=(16, y, self.width - 32, 44), flex='W')
-        self.time_btn.corner_radius = 8
-        self.time_btn.border_width = 1
-        self.time_btn.border_color = (0.55, 0.55, 0.65)
-        self.time_btn.background_color = (0.17, 0.17, 0.19)
-        self.time_btn.tint_color = 'white'
-        self.time_btn.font = ('<System>', 15)
-        self.time_btn.action = self._pick_time
-        self.add_subview(self.time_btn)
-
-        if self.mode == 'date':
-            # Hide the time UI entirely for date-only mode
-            self.time_btn.hidden = True
-
-        # Build weekdays and day buttons
-        self._build_weekdays()
-        self._build_day_buttons()
-        self._refresh_month()
-        self._refresh_selected_label()
-        self._refresh_time_label()
-
-    def layout(self):
-        # Keep header and calendar stretched on rotation
-        self.header.width = self.width
-        self._layout_header_buttons()
-        self.month_btn.width = self.width
-
-        self.weekdays_view.width = self.width
-        self.calendar_view.width = self.width
-
-        self.summary_lbl.width = self.width - 32
-        self.time_btn.width = self.width - 32
-
-    def _layout_header_buttons(self):
-        # Place year buttons at extreme left/right, month buttons inside them
-        self.prev_year_btn.x = 8
-        self.next_year_btn.x = self.width - self.next_year_btn.width - 8
-
-        self.prev_month_btn.x = self.prev_year_btn.x + self.prev_year_btn.width + 4
-        self.next_month_btn.x = self.next_year_btn.x - self.next_month_btn.width - 4
-
-    # ---------------- Calendar UI helpers ----------------
-    def _build_weekdays(self):
-        for sv in list(self.weekdays_view.subviews):
-            self.weekdays_view.remove_subview(sv)
-
-        labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-        w = self.width / 7.0
-        for i, text in enumerate(labels):
-            lbl = ui.Label(frame=(i * w, 0, w, self.weekdays_view.height), flex='W')
-            lbl.text = text
-            lbl.font = ('<System>', 12)
-            lbl.alignment = ui.ALIGN_CENTER
-            lbl.text_color = (0.7, 0.7, 0.75)
-            self.weekdays_view.add_subview(lbl)
-
-    def _build_day_buttons(self):
-        self.day_buttons = []
-        for sv in list(self.calendar_view.subviews):
-            self.calendar_view.remove_subview(sv)
-
-        rows = 6
-        cols = 7
-        cell_w = self.width / cols
-        cell_h = 40
-
-        for r in range(rows):
-            for c in range(cols):
-                idx = r * cols + c
-                b = ui.Button()
-                b.frame = (c * cell_w, r * cell_h, cell_w, cell_h)
-                b.font = ('<System>', 14)
-                b.background_color = 'black'
-                b.tint_color = 'white'
-                b.border_width = 0
-                b.action = self._day_tapped
-                b.tag = idx  # index
-                self.calendar_view.add_subview(b)
-                self.day_buttons.append(b)
-
-    def _refresh_month(self):
-        # Title
-        dt = datetime(self.view_year, self.view_month, 1)
-        month_name = dt.strftime('%B')
-        self.month_btn.title = f'{month_name} {self.view_year} ▾'
-
-        # Prepare data for days
-        grid_dates = _days_for_month_grid(self.view_year, self.view_month)
-
-        # Clear / refill
-        today = datetime.now().date()
-        selected_date = self.selected_dt.date()
-
-        for btn, d in zip(self.day_buttons, grid_dates):
-            btn.enabled = True
-            btn.title = str(d.day)
-            btn.date_value = datetime(d.year, d.month, d.day,
-                                      self.selected_dt.hour,
-                                      self.selected_dt.minute)
-
-            in_month = (d.month == self.view_month)
-
-            # Min date restriction
-            if self.min_dt and btn.date_value.date() < self.min_dt.date():
-                btn.enabled = False
-                btn.tint_color = (0.4, 0.4, 0.45)
-            else:
-                btn.tint_color = 'white'
-
-            # Base style
-            if not in_month:
-                btn.alpha = 0.35
-            else:
-                btn.alpha = 1.0
-
-            # Selected / today styles
-            if d == selected_date:
-                btn.background_color = (0.25, 0.25, 0.28)
-                try:
-                    btn.border_color = hex_to_ui_color('#D4AF37')
-                except Exception:
-                    btn.border_color = (0.9, 0.8, 0.4)
-                btn.border_width = 1
-            else:
-                btn.background_color = 'black'
-                # Ring today if not selected
-                if d == today:
-                    btn.border_width = 1
-                    try:
-                        btn.border_color = hex_to_ui_color('#D4AF37')
-                    except Exception:
-                        btn.border_color = (0.9, 0.8, 0.4)
-                else:
-                    btn.border_width = 0
-
-    def _day_tapped(self, sender):
-        if not getattr(sender, 'enabled', False):
-            return
-        d = getattr(sender, 'date_value', None)
-        if not d:
-            return
-        # Preserve time
-        self.selected_dt = self.selected_dt.replace(
-            year=d.year, month=d.month, day=d.day
-        )
-        self.view_year = d.year
-        self.view_month = d.month
-        self._refresh_month()
-        self._refresh_selected_label()
-        try:
-            haptic_selection()
-        except Exception:
-            pass
-
-    def _prev_month(self, sender):
-        y, m = self.view_year, self.view_month
-        m -= 1
-        if m < 1:
-            m = 12
-            y -= 1
-        self.view_year, self.view_month = y, m
-        self._refresh_month()
-        try:
-            haptic_selection()
-        except Exception:
-            pass
-
-    def _next_month(self, sender):
-        y, m = self.view_year, self.view_month
-        m += 1
-        if m > 12:
-            m = 1
-            y += 1
-        self.view_year, self.view_month = y, m
-        self._refresh_month()
-        try:
-            haptic_selection()
-        except Exception:
-            pass
-
-    def _prev_year(self, sender):
-        self.view_year -= 1
-        self._refresh_month()
-        try:
-            haptic_selection()
-        except Exception:
-            pass
-
-    def _next_year(self, sender):
-        self.view_year += 1
-        self._refresh_month()
-        try:
-            haptic_selection()
-        except Exception:
-            pass
-
-    # ---------------- Month/year popup ----------------
-    def _toggle_month_year_popup(self, sender):
-        if self.month_year_popup is not None:
-            self._hide_month_year_popup()
-        else:
-            self._show_month_year_popup()
-
-    def _show_month_year_popup(self):
-        if self.month_year_popup is not None:
-            return
-
-        header_frame = self.header.frame
-        popup_height = 260
-        popup_width = self.width - 32
-        x = 16
-        y = header_frame.y + header_frame.height
-
-        popup = ui.View(frame=(x, y, popup_width, popup_height))
-        popup.background_color = (0.10, 0.10, 0.12)
-        popup.corner_radius = 12
-        popup.border_width = 1
-        try:
-            popup.border_color = hex_to_ui_color('#D4AF37')
-        except Exception:
-            popup.border_color = (0.9, 0.8, 0.4)
-        popup.alpha = 0.0
-        self.add_subview(popup)
-
-        # Inner layout: two columns Month / Year
-        padding = 8
-        col_width = (popup_width - padding * 3) / 2.0
-        label_h = 20
-        list_top = padding + label_h + 4
-        list_h = popup_height - list_top - padding
-
-        # Month label
-        month_label = ui.Label(frame=(padding, padding, col_width, label_h))
-        month_label.text = 'Month'
-        month_label.font = ('<System>', 13)
-        month_label.text_color = 'white'
-        month_label.alignment = ui.ALIGN_CENTER
-        popup.add_subview(month_label)
-
-        # Year label
-        year_label = ui.Label(frame=(padding * 2 + col_width, padding, col_width, label_h))
-        year_label.text = 'Year'
-        year_label.font = ('<System>', 13)
-        year_label.text_color = 'white'
-        year_label.alignment = ui.ALIGN_CENTER
-        popup.add_subview(year_label)
-
-        # Month values 1..12
-        months = list(range(1, 13))
-        # Year values around current
-        current_year = self.view_year
-        years = list(range(current_year - 10, current_year + 11))
-
-        def on_month_select(m):
-            # Keep current year, update month
-            self.view_month = int(m)
-            self._refresh_month()
-            self._refresh_selected_label()
-
-        def on_year_select(y_val):
-            self.view_year = int(y_val)
-            self._refresh_month()
-            self._refresh_selected_label()
-
-        self.month_ds = DateTimePicker._ListDataSource(
-            months,
-            on_select=on_month_select,
-            format_func=lambda m: calendar.month_name[m]
-        )
-        self.year_ds = DateTimePicker._ListDataSource(
-            years,
-            on_select=on_year_select,
-            format_func=lambda y_val: str(y_val)
-        )
-        self.month_ds.selected_value = self.view_month
-        self.year_ds.selected_value = self.view_year
-
-        # Month table
-        self.month_table = ui.TableView(frame=(padding, list_top, col_width, list_h))
-        self.month_table.row_height = 30
-        self.month_table.data_source = self.month_ds
-        self.month_table.delegate = self.month_ds
-        self.month_table.background_color = (0.10, 0.10, 0.12)
-        self.month_table.separator_color = (0.20, 0.20, 0.22)
-        popup.add_subview(self.month_table)
-
-        # Year table
-        self.year_table = ui.TableView(frame=(padding * 2 + col_width, list_top, col_width, list_h))
-        self.year_table.row_height = 30
-        self.year_table.data_source = self.year_ds
-        self.year_table.delegate = self.year_ds
-        self.year_table.background_color = (0.10, 0.10, 0.12)
-        self.year_table.separator_color = (0.20, 0.20, 0.22)
-        popup.add_subview(self.year_table)
-
-        # Scroll roughly to current values
-        def _scroll_to_current():
-            try:
-                m_index = months.index(self.view_month)
-            except ValueError:
-                m_index = 0
-            try:
-                y_index = years.index(self.view_year)
-            except ValueError:
-                y_index = 0
-
-            self.month_table.content_offset = (
-                0,
-                max(0, m_index * self.month_table.row_height - self.month_table.height / 2),
-            )
-            self.year_table.content_offset = (
-                0,
-                max(0, y_index * self.year_table.row_height - self.year_table.height / 2),
-            )
-
-        ui.delay(_scroll_to_current, 0.01)
-
-        self.month_year_popup = popup
-
-        def anim():
-            popup.alpha = 1.0
-        ui.animate(anim, duration=0.2)
-        try:
-            haptic_selection()
-        except Exception:
-            pass
-
-    def _hide_month_year_popup(self):
-        if self.month_year_popup is None:
-            return
-        popup = self.month_year_popup
-
-        def anim():
-            popup.alpha = 0.0
-
-        def cleanup():
-            if popup.superview is not None:
-                popup.superview.remove_subview(popup)
-            self.month_year_popup = None
-            self.month_table = None
-            self.year_table = None
-            self.month_ds = None
-            self.year_ds = None
-
-        ui.animate(anim, duration=0.2, completion=cleanup)
-        try:
-            haptic_selection()
-        except Exception:
-            pass
-
-    # ---------------- Time selection ----------------
-    def _refresh_time_label(self):
-        if self.mode == 'date':
-            # No time UI in date mode
-            self.summary_lbl.text = self.selected_dt.strftime('Selected: %d %b %Y')
-            return
-
-        t_str = self.selected_dt.strftime('%I:%M %p').lstrip('0')
-        self.time_btn.title = f'Time: {t_str}'
-        self.summary_lbl.text = self.selected_dt.strftime('Selected: %d %b %Y ') + t_str
-
-    def _pick_time(self, sender):
-        if self.mode == 'date':
-            return  # safety
-
-        # Simple time picker using dialogs.form_dialog
-        h = self.selected_dt.hour
-        m = self.selected_dt.minute
-        am_pm = 'AM'
-        if h >= 12:
-            am_pm = 'PM'
-        h12 = h % 12
-        if h12 == 0:
-            h12 = 12
-
-        form_fields = [
-            {'title': 'Hour', 'type': 'number', 'value': str(h12)},
-            {'title': 'Minute', 'type': 'number', 'value': str(m)},
-            {'title': 'AM/PM', 'type': 'segmented',
-             'segments': ['AM', 'PM'], 'value': am_pm},
-        ]
-        res = dialogs.form_dialog(title='Select time', fields=form_fields)
-        if not res:
-            return
-
-        try:
-            new_h = int(res.get('Hour', h12))
-        except Exception:
-            new_h = h12
-        try:
-            new_m = int(res.get('Minute', m))
-        except Exception:
-            new_m = m
-        new_am_pm = res.get('AM/PM', am_pm) or am_pm
-
-        # Clamp values
-        new_h = max(1, min(12, new_h))
-        new_m = max(0, min(59, new_m))
-
-        # Snap to minute_step
-        step = self.minute_step
-        new_m = int(round(new_m / float(step))) * step
-        if new_m >= 60:
-            new_m = 60 - step
-
-        # Convert back to 24h
-        if new_am_pm == 'AM':
-            if new_h == 12:
-                new_h = 0
-        else:
-            if new_h != 12:
-                new_h += 12
-
-        self.selected_dt = self.selected_dt.replace(hour=new_h, minute=new_m)
-        self._refresh_time_label()
-        try:
-            haptic_selection()
-        except Exception:
-            pass
-
-    # ---------------- Summary label ----------------
-    def _refresh_selected_label(self):
-        if self.mode == 'date':
-            self.summary_lbl.text = self.selected_dt.strftime('Selected: %d %b %Y')
-        else:
-            self._refresh_time_label()
-
-    # ---------------- Save / Clear / Cancel ----------------
-    def _final_result(self, value):
-        if callable(self.on_result):
-            try:
-                self.on_result(value)
-            except Exception:
-                pass
-
-    def _save(self, sender):
-        # Convert to ISO using helper
-        iso_value = to_iso_seconds(self.selected_dt)
-        self._final_result(iso_value)
-        try:
-            haptic_success()
-        except Exception:
-            pass
-        if self.navigation_view:
-            self.navigation_view.pop_view()
-        else:
-            self.close()
-
-    def _clear(self, sender):
-        if not self.allow_clear:
-            return
-        self._final_result('')
-        try:
-            haptic_selection()
-        except Exception:
-            pass
-        if self.navigation_view:
-            self.navigation_view.pop_view()
-        else:
-            self.close()
-
-    def _cancel(self, sender):
-        self._final_result(None)
-        if self.navigation_view:
-            self.navigation_view.pop_view()
-        else:
-            self.close()
-            
-        def __init__(self, values, on_select, format_func=None):
-            self.values = values
-            self.on_select = on_select
-            self.format_func = format_func
-            self.selected_value = None
-
-        def tableview_number_of_sections(self, tv):
-            return 1
-
-        def tableview_number_of_rows(self, tv, section):
-            return len(self.values)
-
-        def tableview_cell_for_row(self, tv, section, row):
-            cell = ui.TableViewCell()
-            v = self.values[row]
-            if self.format_func:
-                text = self.format_func(v)
-            else:
-                text = str(v)
-            cell.text_label.text = text
-            cell.text_label.alignment = ui.ALIGN_CENTER
-            cell.text_label.font = ('<System>', 16)
-            cell.background_color = (0.10, 0.10, 0.12)
-            cell.text_label.text_color = 'white'
-            if self.selected_value == v:
-                cell.background_color = (0.24, 0.24, 0.28)
-            return cell
-
-        def tableview_did_select(self, tv, section, row):
-            v = self.values[row]
-            self.selected_value = v
-            if callable(self.on_select):
-                self.on_select(v)
-            tv.reload_data()
-
-    def __init__(self,
-                 title='Select date/time',
-                 initial_iso='',
-                 allow_clear=True,
-                 min_iso=None,
-                 mode='datetime',
-                 minute_step=5,
-                 on_result=None):
-        super().__init__(frame=(0, 0, 540, 720))
-        self.background_color = 'black'
-        self.name = title
-
-        self.allow_clear = allow_clear
-        self.on_result = on_result
-        self.mode = mode if mode in ('date', 'datetime') else 'datetime'
-        self.minute_step = max(1, int(minute_step or 1))
-
-        # Parse dates using your existing helpers
-        base_dt = parse_iso_or_now(initial_iso)
-        base_dt = base_dt.replace(second=0, microsecond=0)
-
-        self.selected_dt = base_dt
-        self.view_year = base_dt.year
-        self.view_month = base_dt.month
-
+        # All day state
+        self.all_day = False
+        self._saved_time = None  # (hour, minute) when exiting all-day
+
+        # Optional minimum date/time
         self.min_dt = None
         if min_iso:
             try:
@@ -1560,8 +937,17 @@ class DateTimePicker(ui.View):
         self.month_ds = None
         self.year_ds = None
 
+        # Time popup state
+        self.time_popup = None
+        self.hour_table = None
+        self.minute_table = None
+        self.period_table = None
+        self.hour_ds = None
+        self.minute_ds = None
+        self.period_ds = None
+        self._time_period = 'AM'
+
         # Navigation bar buttons
-        # Left: Cancel; Save/Clear are bottom buttons
         self.left_button_items = [ui.ButtonItem(title='Cancel', action=self._cancel)]
         self.right_button_items = []
 
@@ -1610,7 +996,6 @@ class DateTimePicker(ui.View):
         self.header.add_subview(self.next_btn)
 
         # Month-year label as a button (clickable)
-        # It will be resized in _layout_header_buttons so it does not cover arrows
         self.month_lbl = ui.Button(frame=(0, 10, self.width, 36), flex='W')
         self.month_lbl.alignment = ui.ALIGN_CENTER
         self.month_lbl.tint_color = 'white'
@@ -1619,7 +1004,6 @@ class DateTimePicker(ui.View):
         self.month_lbl.action = self._month_label_tapped
         self.header.add_subview(self.month_lbl)
 
-        # Position header buttons
         self._layout_header_buttons()
         y += self.header.height
 
@@ -1637,7 +1021,26 @@ class DateTimePicker(ui.View):
         self.summary_lbl = ui.Label(frame=(16, y, self.width - 32, 24), flex='W')
         self.summary_lbl.text_color = (0.82, 0.82, 0.88)
         self.summary_lbl.font = ('<System>', 14)
+        self.summary_lbl.alignment = ui.ALIGN_CENTER
         self.add_subview(self.summary_lbl)
+        y += 28
+
+        # All-day row (label + switch)
+        self.all_day_label = ui.Label(frame=(16, y, self.width - 90, 26), flex='W')
+        self.all_day_label.text = 'All day'
+        self.all_day_label.text_color = (0.9, 0.9, 0.95)
+        self.all_day_label.font = ('<System>', 14)
+        self.add_subview(self.all_day_label)
+
+        self.all_day_switch = ui.Switch()
+        self.all_day_switch.frame = (self.width - 16 - self.all_day_switch.width,
+                                     y - 2,
+                                     self.all_day_switch.width,
+                                     self.all_day_switch.height)
+        self.all_day_switch.flex = 'L'
+        self.all_day_switch.value = False
+        self.all_day_switch.action = self._toggle_all_day
+        self.add_subview(self.all_day_switch)
         y += 32
 
         # Time button (only for datetime mode)
@@ -1653,6 +1056,8 @@ class DateTimePicker(ui.View):
 
         if self.mode == 'date':
             self.time_btn.hidden = True
+            self.all_day_label.hidden = True
+            self.all_day_switch.hidden = True
 
         # Footer: bottom Save / Clear buttons
         y_footer = y + (0 if self.mode == 'date' else 52)
@@ -1679,11 +1084,11 @@ class DateTimePicker(ui.View):
         self.footer_save.corner_radius = 9
         self.footer_save.border_width = 1
         try:
-            self.footer_save.border_color = hex_to_ui_color('#D4AF37')
-            self.footer_save.background_color = hex_to_ui_color('#D4AF37')
+            gold = hex_to_ui_color('#D4AF37')
         except Exception:
-            self.footer_save.border_color = (0.9, 0.8, 0.4)
-            self.footer_save.background_color = (0.9, 0.8, 0.4)
+            gold = (0.9, 0.8, 0.4)
+        self.footer_save.border_color = gold
+        self.footer_save.background_color = gold
         self.footer_save.tint_color = 'black'
         self.footer_save.font = ('<System-Bold>', 16)
         self.footer_save.title = 'Save'
@@ -1697,6 +1102,7 @@ class DateTimePicker(ui.View):
         self._refresh_selected_label()
         self._refresh_time_label()
 
+    # ---------- layout ----------
     def _layout_header_buttons(self):
         # Left cluster: year back then month back
         self.prev_year_btn.x = 8
@@ -1715,7 +1121,6 @@ class DateTimePicker(ui.View):
                                 self.month_lbl.height)
 
     def layout(self):
-        # Keep header and calendar stretched on rotation
         self.header.width = self.width
         self._layout_header_buttons()
 
@@ -1723,6 +1128,11 @@ class DateTimePicker(ui.View):
         self.calendar_view.width = self.width
 
         self.summary_lbl.width = self.width - 32
+
+        # All day row
+        self.all_day_label.width = self.width - 90
+        self.all_day_switch.x = self.width - 16 - self.all_day_switch.width
+
         self.time_btn.width = self.width - 32
 
         self.footer.width = self.width
@@ -1731,14 +1141,16 @@ class DateTimePicker(ui.View):
         self.footer_save.width = btn_w
         self.footer_save.x = 16 + btn_w + 16
 
-        # Keep popup full width if visible
+        # Keep time popup full width if visible
+        if self.time_popup is not None:
+            self.time_popup.width = self.width
         if self.monthyear_popup is not None:
             self.monthyear_popup.width = self.width
             if self.monthyear_popup.subviews:
                 inner = self.monthyear_popup.subviews[0]
                 inner.width = self.width - 16
 
-    # ---------------- Calendar UI helpers ----------------
+    # ---------- calendar helpers ----------
     def _build_weekdays(self):
         for sv in list(self.weekdays_view.subviews):
             self.weekdays_view.remove_subview(sv)
@@ -1773,21 +1185,18 @@ class DateTimePicker(ui.View):
                 b.tint_color = 'white'
                 b.border_width = 0
                 b.action = self._day_tapped
-                b.tag = idx  # index
+                b.tag = idx
                 self.calendar_view.add_subview(b)
                 self.day_buttons.append(b)
 
     def _refresh_month(self):
-        # Title text with double down arrows on both sides
         dt = datetime(self.view_year, self.view_month, 1)
         center_text = dt.strftime('%B %Y')
         self.month_lbl.title = f'▾ {center_text} ▾'
 
-        # Prepare data for days
         first_weekday, num_days = monthrange(self.view_year, self.view_month)
-        start_col = first_weekday  # 0..6
+        start_col = first_weekday
 
-        # Clear all buttons first
         for b in self.day_buttons:
             b.enabled = False
             b.title = ''
@@ -1795,7 +1204,6 @@ class DateTimePicker(ui.View):
             b.border_width = 0
             b.border_color = 'clear'
 
-        # Fill buttons
         day = 1
         for d in range(num_days):
             idx = start_col + d
@@ -1808,14 +1216,11 @@ class DateTimePicker(ui.View):
                                     self.selected_dt.hour,
                                     self.selected_dt.minute)
 
-            # Min date restriction
             if self.min_dt and b.date_value.date() < self.min_dt.date():
                 b.enabled = False
-                b.title = str(day)
                 b.tint_color = (0.4, 0.4, 0.45)
             else:
                 b.tint_color = 'white'
-
             day += 1
 
         self._highlight_selected_day()
@@ -1845,7 +1250,6 @@ class DateTimePicker(ui.View):
         d = getattr(sender, 'date_value', None)
         if not d:
             return
-        # Preserve time
         self.selected_dt = self.selected_dt.replace(
             year=d.year, month=d.month, day=d.day
         )
@@ -1858,7 +1262,7 @@ class DateTimePicker(ui.View):
         except Exception:
             pass
 
-    # -------- year and month navigation buttons --------
+    # ---------- year & month buttons ----------
     def _prev_year(self, sender):
         y = self.view_year - 1
         m = self.view_month
@@ -1917,7 +1321,7 @@ class DateTimePicker(ui.View):
         except Exception:
             pass
 
-    # ---------------- month/year popup via label tap ----------------
+    # ---------- month/year popup ----------
     def _month_label_tapped(self, sender):
         if self.monthyear_popup is not None:
             self._hide_monthyear_popup()
@@ -1948,7 +1352,6 @@ class DateTimePicker(ui.View):
         list_top = top_pad + label_h + 4
         list_h = inner.height - list_top - 40
 
-        # Labels
         month_label = ui.Label(frame=(col_pad, top_pad, col_w, label_h))
         month_label.text = 'Month'
         month_label.font = ('<System>', 12)
@@ -1963,12 +1366,10 @@ class DateTimePicker(ui.View):
         year_label.alignment = ui.ALIGN_CENTER
         inner.add_subview(year_label)
 
-        # Values
         months = list(range(1, 13))
         current_year = self.view_year
         years = list(range(current_year - 10, current_year + 11))
 
-        # Data sources
         def on_month_sel(val):
             day = min(self.selected_dt.day, monthrange(self.view_year, val)[1])
             self.view_month = val
@@ -1983,7 +1384,6 @@ class DateTimePicker(ui.View):
             self._refresh_month()
             self._refresh_selected_label()
 
-        # Month list uses names here, without needing calendar module
         MONTH_NAMES = (
             'January', 'February', 'March', 'April', 'May', 'June',
             'July', 'August', 'September', 'October', 'November', 'December'
@@ -2000,11 +1400,9 @@ class DateTimePicker(ui.View):
             format_func=None
         )
 
-        # Pre select current month/year
         self.month_ds.selected_value = self.view_month
         self.year_ds.selected_value = self.view_year
 
-        # Month table
         self.month_table = ui.TableView(frame=(col_pad, list_top, col_w, list_h))
         self.month_table.row_height = 30
         self.month_table.data_source = self.month_ds
@@ -2013,7 +1411,6 @@ class DateTimePicker(ui.View):
         self.month_table.separator_color = (0.20, 0.20, 0.22)
         inner.add_subview(self.month_table)
 
-        # Year table
         self.year_table = ui.TableView(frame=(col_pad * 2 + col_w, list_top, col_w, list_h))
         self.year_table.row_height = 30
         self.year_table.data_source = self.year_ds
@@ -2022,7 +1419,6 @@ class DateTimePicker(ui.View):
         self.year_table.separator_color = (0.20, 0.20, 0.22)
         inner.add_subview(self.year_table)
 
-        # Scroll current selections into view
         def _scroll_to_current():
             try:
                 mi = months.index(self.view_month)
@@ -2032,7 +1428,6 @@ class DateTimePicker(ui.View):
                 yi = years.index(self.view_year)
             except ValueError:
                 yi = 0
-
             self.month_table.content_offset = (
                 0,
                 max(0, mi * self.month_table.row_height - self.month_table.height / 2),
@@ -2043,7 +1438,6 @@ class DateTimePicker(ui.View):
             )
         ui.delay(_scroll_to_current, 0.02)
 
-        # Confirm button
         confirm_btn = ui.Button()
         confirm_btn.title = 'Done'
         confirm_btn.font = ('<System-Bold>', 14)
@@ -2068,7 +1462,6 @@ class DateTimePicker(ui.View):
 
         def anim():
             popup.alpha = 1.0
-
         ui.animate(anim, duration=0.22)
         try:
             haptic_selection()
@@ -2098,10 +1491,41 @@ class DateTimePicker(ui.View):
         except Exception:
             pass
 
-    # ---------------- Time selection ----------------
+    # ---------- all day toggle ----------
+    def _toggle_all_day(self, sender):
+        val = bool(sender.value)
+        if val and not self.all_day:
+            # Enter all-day mode: remember previous time, normalise to 00:00
+            self._saved_time = (self.selected_dt.hour, self.selected_dt.minute)
+            self.selected_dt = self.selected_dt.replace(hour=0, minute=0, second=0)
+            self.all_day = True
+            self.time_btn.enabled = False
+            self.time_btn.alpha = 0.5
+        elif not val and self.all_day:
+            # Exit all-day mode: restore last time if available
+            self.all_day = False
+            if self._saved_time is not None:
+                h, m = self._saved_time
+                self.selected_dt = self.selected_dt.replace(hour=h, minute=m, second=0)
+            self.time_btn.enabled = True
+            self.time_btn.alpha = 1.0
+
+        self._refresh_time_label()
+        self._refresh_selected_label()
+        try:
+            haptic_selection()
+        except Exception:
+            pass
+
+    # ---------- time label + popup ----------
     def _refresh_time_label(self):
         if self.mode == 'date':
             self.summary_lbl.text = self.selected_dt.strftime('Selected: %d %b %Y')
+            return
+
+        if self.all_day:
+            self.time_btn.title = 'All day'
+            self.summary_lbl.text = self.selected_dt.strftime('Selected: %d %b %Y (All day)')
             return
 
         t_str = self.selected_dt.strftime('%I:%M %p').lstrip('0')
@@ -2109,72 +1533,233 @@ class DateTimePicker(ui.View):
         self.summary_lbl.text = self.selected_dt.strftime('Selected: %d %b %Y ') + t_str
 
     def _pick_time(self, sender):
-        if self.mode == 'date':
-            return  # safety
+        if self.mode == 'date' or self.all_day:
+            return
+        if self.time_popup is not None:
+            self._hide_time_popup()
+        else:
+            self._show_time_popup()
 
-        # Simple time picker using dialogs.form_dialog
-        h = self.selected_dt.hour
-        m = self.selected_dt.minute
-        am_pm = 'AM'
-        if h >= 12:
-            am_pm = 'PM'
-        h12 = h % 12
-        if h12 == 0:
-            h12 = 12
-
-        form_fields = [
-            {'title': 'Hour', 'type': 'number', 'value': str(h12)},
-            {'title': 'Minute', 'type': 'number', 'value': str(m)},
-            {'title': 'AM/PM', 'type': 'segmented',
-             'segments': ['AM', 'PM'], 'value': am_pm},
-        ]
-        res = dialogs.form_dialog(title='Select time', fields=form_fields)
-        if not res:
+    def _show_time_popup(self):
+        if self.time_popup is not None:
             return
 
-        try:
-            new_h = int(res.get('Hour', h12))
-        except Exception:
-            new_h = h12
-        try:
-            new_m = int(res.get('Minute', m))
-        except Exception:
-            new_m = m
-        new_am_pm = res.get('AM/PM', am_pm) or am_pm
+        popup_h = 220
+        btn_frame = self.time_btn.frame
+        popup = ui.View(frame=(0,
+                               btn_frame.y + btn_frame.height + 4,
+                               self.width,
+                               popup_h))
+        popup.background_color = (0, 0, 0, 0.7)
+        popup.alpha = 0.0
+        self.add_subview(popup)
 
-        # Clamp values
-        new_h = max(1, min(12, new_h))
-        new_m = max(0, min(59, new_m))
+        inner = ui.View(frame=(8, 8, self.width - 16, popup_h - 16))
+        inner.background_color = (0.10, 0.10, 0.12)
+        inner.corner_radius = 10
+        popup.add_subview(inner)
 
-        # Snap to minute_step
-        step = self.minute_step
-        new_m = int(round(new_m / float(step))) * step
-        if new_m >= 60:
-            new_m = 60 - step
+        col_pad = 8
+        col_w = (inner.width - col_pad * 4) / 3.0
+        top_pad = 8
+        label_h = 18
+        list_top = top_pad + label_h + 4
+        list_h = inner.height - list_top - 40
 
-        # Convert back to 24h
-        if new_am_pm == 'AM':
-            if new_h == 12:
-                new_h = 0
+        hour_label = ui.Label(frame=(col_pad, top_pad, col_w, label_h))
+        hour_label.text = 'Hour'
+        hour_label.font = ('<System>', 12)
+        hour_label.text_color = 'white'
+        hour_label.alignment = ui.ALIGN_CENTER
+        inner.add_subview(hour_label)
+
+        minute_label = ui.Label(frame=(col_pad * 2 + col_w, top_pad, col_w, label_h))
+        minute_label.text = 'Minute'
+        minute_label.font = ('<System>', 12)
+        minute_label.text_color = 'white'
+        minute_label.alignment = ui.ALIGN_CENTER
+        inner.add_subview(minute_label)
+
+        period_label = ui.Label(frame=(col_pad * 3 + col_w * 2, top_pad, col_w, label_h))
+        period_label.text = 'AM/PM'
+        period_label.font = ('<System>', 12)
+        period_label.text_color = 'white'
+        period_label.alignment = ui.ALIGN_CENTER
+        inner.add_subview(period_label)
+
+        hours = list(range(1, 13))
+        minutes = list(range(0, 60, self.minute_step))
+        periods = ['AM', 'PM']
+
+        h24 = self.selected_dt.hour
+        if h24 == 0:
+            h12 = 12
+            period = 'AM'
+        elif 1 <= h24 <= 11:
+            h12 = h24
+            period = 'AM'
+        elif h24 == 12:
+            h12 = 12
+            period = 'PM'
         else:
-            if new_h != 12:
-                new_h += 12
+            h12 = h24 - 12
+            period = 'PM'
+        self._time_period = period
 
-        self.selected_dt = self.selected_dt.replace(hour=new_h, minute=new_m)
-        self._refresh_time_label()
+        cur_min = self.selected_dt.minute
+        step = self.minute_step
+        min_rounded = (cur_min // step) * step
+
+        def _apply_time(h12=None, minute=None, period_str=None):
+            if h12 is None:
+                h12 = self.hour_ds.selected_value or 12
+            if minute is None:
+                minute = self.minute_ds.selected_value if self.minute_ds.selected_value is not None else min_rounded
+            if period_str is None:
+                period_str = self._time_period
+
+            if period_str == 'AM':
+                h24_local = 0 if h12 == 12 else h12
+            else:
+                h24_local = 12 if h12 == 12 else h12 + 12
+
+            self._time_period = period_str
+            self.selected_dt = self.selected_dt.replace(hour=h24_local, minute=minute, second=0)
+            self._refresh_time_label()
+            self._refresh_selected_label()
+
+        def on_hour_selected(val):
+            _apply_time(h12=val, minute=None, period_str=None)
+
+        def on_min_selected(val):
+            _apply_time(h12=None, minute=val, period_str=None)
+
+        def on_period_selected(val):
+            _apply_time(h12=None, minute=None, period_str=val)
+
+        self.hour_ds = DateTimePicker._ListDataSource(hours, on_hour_selected, format_func=None)
+        self.minute_ds = DateTimePicker._ListDataSource(minutes, on_min_selected,
+                                                        format_func=lambda m: f'{m:02d}')
+        self.period_ds = DateTimePicker._ListDataSource(periods, on_period_selected, format_func=None)
+
+        self.hour_ds.selected_value = h12
+        self.minute_ds.selected_value = min_rounded
+        self.period_ds.selected_value = period
+
+        self.hour_table = ui.TableView(frame=(col_pad, list_top, col_w, list_h))
+        self.hour_table.row_height = 30
+        self.hour_table.data_source = self.hour_ds
+        self.hour_table.delegate = self.hour_ds
+        self.hour_table.background_color = (0.10, 0.10, 0.12)
+        self.hour_table.separator_color = (0.20, 0.20, 0.22)
+        inner.add_subview(self.hour_table)
+
+        self.minute_table = ui.TableView(frame=(col_pad * 2 + col_w, list_top, col_w, list_h))
+        self.minute_table.row_height = 30
+        self.minute_table.data_source = self.minute_ds
+        self.minute_table.delegate = self.minute_ds
+        self.minute_table.background_color = (0.10, 0.10, 0.12)
+        self.minute_table.separator_color = (0.20, 0.20, 0.22)
+        inner.add_subview(self.minute_table)
+
+        self.period_table = ui.TableView(frame=(col_pad * 3 + col_w * 2, list_top, col_w, list_h))
+        self.period_table.row_height = 30
+        self.period_table.data_source = self.period_ds
+        self.period_table.delegate = self.period_ds
+        self.period_table.background_color = (0.10, 0.10, 0.12)
+        self.period_table.separator_color = (0.20, 0.20, 0.22)
+        inner.add_subview(self.period_table)
+
+        def _scroll_to_current():
+            try:
+                hi = hours.index(h12)
+            except ValueError:
+                hi = 0
+            try:
+                mi = minutes.index(min_rounded)
+            except ValueError:
+                mi = 0
+            try:
+                pi = periods.index(period)
+            except ValueError:
+                pi = 0
+
+            self.hour_table.content_offset = (
+                0,
+                max(0, hi * self.hour_table.row_height - self.hour_table.height / 2),
+            )
+            self.minute_table.content_offset = (
+                0,
+                max(0, mi * self.minute_table.row_height - self.minute_table.height / 2),
+            )
+            self.period_table.content_offset = (
+                0,
+                max(0, pi * self.period_table.row_height - self.period_table.height / 2),
+            )
+        ui.delay(_scroll_to_current, 0.02)
+
+        confirm_btn = ui.Button()
+        confirm_btn.title = 'Done'
+        confirm_btn.font = ('<System-Bold>', 14)
+        confirm_btn.tint_color = 'black'
+        try:
+            confirm_btn.background_color = hex_to_ui_color('#D4AF37')
+        except Exception:
+            confirm_btn.background_color = (0.9, 0.8, 0.4)
+        confirm_btn.corner_radius = 8
+        confirm_btn.frame = (col_pad,
+                             inner.height - 32,
+                             inner.width - col_pad * 2,
+                             26)
+
+        def _confirm(sender):
+            self._hide_time_popup()
+
+        confirm_btn.action = _confirm
+        inner.add_subview(confirm_btn)
+
+        self.time_popup = popup
+
+        def anim():
+            popup.alpha = 1.0
+        ui.animate(anim, duration=0.22)
         try:
             haptic_selection()
         except Exception:
             pass
 
-    # ---------------- Summary label ----------------
+    def _hide_time_popup(self):
+        if self.time_popup is None:
+            return
+        popup = self.time_popup
+
+        def anim():
+            popup.alpha = 0.0
+
+        def cleanup():
+            if popup.superview:
+                popup.superview.remove_subview(popup)
+            self.time_popup = None
+            self.hour_table = None
+            self.minute_table = None
+            self.period_table = None
+            self.hour_ds = None
+            self.minute_ds = None
+            self.period_ds = None
+
+        ui.animate(anim, duration=0.18, completion=cleanup)
+        try:
+            haptic_selection()
+        except Exception:
+            pass
+
+    # ---------- summary + save/clear/cancel ----------
     def _refresh_selected_label(self):
         if self.mode == 'date':
             self.summary_lbl.text = self.selected_dt.strftime('Selected: %d %b %Y')
         else:
             self._refresh_time_label()
 
-    # ---------------- Save / Clear / Cancel ----------------
     def _final_result(self, value):
         if callable(self.on_result):
             try:
