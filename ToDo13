@@ -17,6 +17,7 @@ import time
 from datetime import datetime, date, timedelta
 from calendar import monthrange
 from pathlib import Path
+from objc_util import ObjCInstance, ObjCClass
 import calendar
 
 # Knowledge centre storage
@@ -192,30 +193,44 @@ def load_items():
         try:
             with open(DATA_PATH, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            items = []
-            for it in data if isinstance(data, list) else []:
-                if isinstance(it, dict):
-                    title = str(it.get('title', 'Untitled'))
-                    done = bool(it.get('done', False))
-                    color = (it.get('color') or '#8E8E93')
-                    try:
-                        hex_to_rgb(color)
-                    except Exception:
-                        color = '#8E8E93'
-                    created_at = it.get('created_at') or datetime.now().isoformat()
-                    due_at = it.get('due_at', '')
-                    items.append({'title': title, 'done': done, 'color': color,
-                                  'created_at': created_at, 'due_at': due_at})
-            if items:
-                return items
         except Exception:
-            pass
+            data = []
+        items = []
+        for it in data:
+            if isinstance(it, dict):
+                title = str(it.get('title', 'Untitled'))
+                done = bool(it.get('done', False))
+                color = (it.get('color') or '#8E8E93')
+                try:
+                    hex_to_rgb(color)
+                except Exception:
+                    color = '#8E8E93'
+                created_at = it.get('created_at') or datetime.now().isoformat()
+                due_at = it.get('due_at', '')
+
+                # New: optional description field, safe for old data
+                description = str(it.get('description', '') or '')
+
+                items.append({
+                    'title': title,
+                    'done': done,
+                    'color': color,
+                    'created_at': created_at,
+                    'due_at': due_at,
+                    'description': description,
+                })
+        return items
+    # Default items if no file yet
     now = datetime.now().isoformat()
     return [
-        {'title': 'Swipe left to delete', 'done': False, 'color': '#FFCC00', 'created_at': now, 'due_at': ''},
-        {'title': 'Example (gray)',       'done': True,  'color': '#8E8E93', 'created_at': now, 'due_at': ''},
-        {'title': 'Orange sample',        'done': False, 'color': '#FF9500', 'created_at': now, 'due_at': ''},
-        {'title': 'Blue sample',          'done': False, 'color': '#007AFF', 'created_at': now, 'due_at': ''},
+        {'title': 'Swipe left to delete', 'done': False, 'color': '#FFCC00',
+         'created_at': now, 'due_at': '', 'description': ''},
+        {'title': 'Example (gray)',       'done': True,  'color': '#8E8E93',
+         'created_at': now, 'due_at': '', 'description': ''},
+        {'title': 'Orange sample',        'done': False, 'color': '#FF9500',
+         'created_at': now, 'due_at': '', 'description': ''},
+        {'title': 'Blue sample',          'done': False, 'color': '#007AFF',
+         'created_at': now, 'due_at': '', 'description': ''},
     ]
 
 def save_items(items):
@@ -3007,9 +3022,23 @@ class SortPanelView(ui.View):
         self.sort_settings.user_default_direction_primary = self.sort_settings.direction_primary
         self.sort_settings.user_default_secondary_mode = self.sort_settings.secondary_mode
         self.sort_settings.user_default_direction_secondary = self.sort_settings.direction_secondary
+
         if callable(self.on_apply):
+            # Apply + persist defaults
             self.on_apply(self.sort_settings, set_as_default=True)
-        self.close()
+
+        # Let the user know it worked
+        try:
+            dialogs.hud_alert('Sort saved and applied', 'success', 0.7)
+        except Exception:
+            pass
+
+        # Return to main screen
+        nav = self.navigation_view
+        if nav:
+            nav.pop_view()
+        else:
+            self.close()
 
     def _clear_filters_tapped(self, sender):
         if callable(self.on_clear_filters):
@@ -4282,9 +4311,73 @@ class ItemDetailView(ui.View):
         self.done_status.font = ('<System>', 14)
         self.add_subview(self.done_status)
 
+        # --- Existing UI setup above this line stays as-is ---
+
+        # Additional content section (created before loading state)
+        self.content_section_title = ui.Label(frame=(16, self.done_lbl.y + 80, self.width - 32, 20), flex='W')
+        self.content_section_title.text = 'Additional content'
+        self.content_section_title.font = ('<System-Bold>', 16)
+        self.add_subview(self.content_section_title)
+
+        y_content = self.content_section_title.y + 24
+
+        # Description preview label
+        self.desc_preview = ui.Label(frame=(16, y_content, self.width - 32, 40), flex='W')
+        self.desc_preview.font = ('<System>', 14)
+        self.desc_preview.number_of_lines = 2
+        self.add_subview(self.desc_preview)
+        y_content += 44
+
+        # You can later add more labels for photos/videos/links under here
+
+        # Now that all UI elements exist, load item state into the view
+
         self._load_from_item()
         self._apply_edit_state()
         self.done_sw.bring_to_front()
+
+    def _edit_extra_content(self, sender):
+        if not self.editing_enabled:
+            dialogs.hud_alert('Tap Edit to modify content', 'warning', 0.8)
+            return
+
+        # Work on the current working state if it exists, otherwise on the item directly
+        state = self._working if self._working is not None else self.item
+
+        # Description
+        desc_initial = str(state.get('description', '') or '')
+        desc = dialogs.text_dialog(title='Item description', text=desc_initial)
+        if desc is not None:
+            state['description'] = desc
+
+        # Simple text based entries for photos, videos, links
+        photos = state.get('photos') or []
+        videos = state.get('videos') or []
+        links = state.get('links') or []
+
+        if dialogs.alert('Photos', 'Add a photo note?', 'Add', 'Skip', hide_cancel_button=True) == 1:
+            note = dialogs.input_alert('Photo note', 'Describe or reference the photo')
+            if note:
+                photos.append(note)
+
+        if dialogs.alert('Videos', 'Add a video note?', 'Add', 'Skip', hide_cancel_button=True) == 1:
+            note = dialogs.input_alert('Video note', 'Describe or reference the video')
+            if note:
+                videos.append(note)
+
+        if dialogs.alert('Links', 'Add a link?', 'Add', 'Skip', hide_cancel_button=True) == 1:
+            label = dialogs.input_alert('Link label', 'Enter a label for this link')
+            if label:
+                url = dialogs.input_alert('Link URL', 'Enter the URL')
+                if url:
+                    links.append({'label': label, 'url': url})
+
+        state['photos'] = photos
+        state['videos'] = videos
+        state['links'] = links
+
+        # Refresh the summary
+        self._load_from_state(state)
 
     def layout(self):
         self.title_lbl.width = self.width - 32
@@ -4331,6 +4424,69 @@ class ItemDetailView(ui.View):
         dv = bool(state.get('done', False))
         self.done_sw.value = dv
         self._update_done_status_text(dv)
+        
+                # Extra content fields
+        desc = str(state.get('description', '') or '')
+        photos = state.get('photos') or []
+        videos = state.get('videos') or []
+        links = state.get('links') or []
+
+        if desc:
+            short = desc.strip().splitlines()[0]
+            if len(short) > 80:
+                short = short[:77] + '...'
+            self.desc_preview.text = f'Description: {short}'
+        else:
+            self.desc_preview.text = 'Description: (none)'
+
+        self.content_counts.text = (
+            f'Photos: {len(photos)}   '
+            f'Videos: {len(videos)}   '
+            f'Links: {len(links)}'
+        )
+        
+        # Extra content summary
+        content_y = self.done_lbl.frame[1] + 60
+        self.content_title = ui.Label(frame=(16, content_y, self.width - 32, 20), flex='W')
+        self.content_title.text = 'Additional content'
+        self.content_title.font = ('<System-Bold>', 16)
+        self.add_subview(self.content_title)
+        content_y += 24
+
+        self.desc_preview = ui.Label(frame=(16, content_y, self.width - 32, 40), flex='W')
+        self.desc_preview.font = ('<System>', 14)
+        self.desc_preview.number_of_lines = 2
+        self.add_subview(self.desc_preview)
+        content_y += 44
+
+        self.content_counts = ui.Label(frame=(16, content_y, self.width - 32, 20), flex='W')
+        self.content_counts.font = ('<System>', 13)
+        self.content_counts.text_color = (0.35, 0.35, 0.4)
+        self.add_subview(self.content_counts)
+        content_y += 28
+
+        self.more_content_btn = ui.Button(frame=(16, content_y, self.width - 32, 32), flex='W')
+        self.more_content_btn.title = 'Add more content'
+        self.more_content_btn.corner_radius = 8
+        self.more_content_btn.border_width = 1
+        self.more_content_btn.border_color = (0.8, 0.8, 0.85)
+        self.more_content_btn.background_color = (1, 1, 1)
+        self.more_content_btn.tint_color = (0.1, 0.1, 0.2)
+        self.more_content_btn.font = ('<System>', 15)
+        self.more_content_btn.action = self._edit_extra_content
+        self.add_subview(self.more_content_btn)
+        
+                # --- Additional content: description preview ---
+        desc = str(state.get('description', '') or '')
+        if desc:
+            first_line = desc.strip().splitlines()[0]
+            if len(first_line) > 80:
+                first_line = first_line[:77] + '...'
+            self.desc_preview.text = 'Description: ' + first_line
+            self.desc_preview.text_color = (0.2, 0.2, 0.25)
+        else:
+            self.desc_preview.text = 'Description: (none)'
+            self.desc_preview.text_color = (0.6, 0.6, 0.65)
 
     def _load_from_item(self):
         self._load_from_state(self.item)
@@ -4417,6 +4573,11 @@ class ItemDetailView(ui.View):
         self.item['due_at'] = state['due_at']
         self.item['done'] = state['done']
         self.item['color'] = state['color']
+        # Preserve extra content (if present in state, or keep existing)
+        self.item['description'] = state.get('description', self.item.get('description', ''))
+        self.item['photos'] = state.get('photos', self.item.get('photos', []))
+        self.item['videos'] = state.get('videos', self.item.get('videos', []))
+        self.item['links'] = state.get('links', self.item.get('links', []))
         if callable(self.on_save):
             self.on_save(self.item)
         self.editing_enabled = False
@@ -4526,6 +4687,15 @@ class NewEntryView(ui.View):
         self.selected_hex = '#007AFF'
         self.selected_name = 'blue'
         self.due_at_iso = ''
+        
+        # Extra content fields
+        self.description_text = ''
+        self.photos = []
+        self.videos = []
+        self.links = []
+
+        # Panel state for "Add more content"
+        self.more_panel_visible = False
 
         self.lbl = ui.Label(frame=(16, 5, self.width - 32, 60), flex='W')
         self.lbl.font = ('Arial-BoldMT', 36)
@@ -4592,6 +4762,53 @@ class NewEntryView(ui.View):
         self._style_button(self.due_btn)
         self.add_subview(self.due_btn)
 
+        # "Add more content" button
+        y_more = self.due_btn.frame[1] + 56
+        self.more_btn = ui.Button(frame=(16, y_more, self.width - 32, 36), flex='W')
+        self.more_btn.title = 'Add more content'
+        self._style_button(self.more_btn)
+        self.more_btn.action = self._toggle_more_panel
+        self.add_subview(self.more_btn)
+
+        # Hidden panel that drops down with options
+        self.more_panel = ui.View(frame=(16, y_more + 44, self.width - 32, 140), flex='W')
+        self.more_panel.background_color = (0.12, 0.12, 0.12)
+        self.more_panel.corner_radius = 8
+        self.more_panel.hidden = True
+        self.add_subview(self.more_panel)
+
+        option_y = 8
+        self.btn_more_desc = ui.Button(frame=(8, option_y, self.more_panel.width - 16, 30),
+                                       flex='W')
+        self.btn_more_desc.title = 'Item description'
+        self._style_button(self.btn_more_desc)
+        self.btn_more_desc.action = self._edit_description
+        self.more_panel.add_subview(self.btn_more_desc)
+        option_y += 34
+
+        self.btn_more_photos = ui.Button(frame=(8, option_y, self.more_panel.width - 16, 30),
+                                         flex='W')
+        self.btn_more_photos.title = 'Photo/s'
+        self._style_button(self.btn_more_photos)
+        self.btn_more_photos.action = self._add_photo_note
+        self.more_panel.add_subview(self.btn_more_photos)
+        option_y += 34
+
+        self.btn_more_videos = ui.Button(frame=(8, option_y, self.more_panel.width - 16, 30),
+                                         flex='W')
+        self.btn_more_videos.title = 'Video/s'
+        self._style_button(self.btn_more_videos)
+        self.btn_more_videos.action = self._add_video_note
+        self.more_panel.add_subview(self.btn_more_videos)
+        option_y += 34
+
+        self.btn_more_links = ui.Button(frame=(8, option_y, self.more_panel.width - 16, 30),
+                                        flex='W')
+        self.btn_more_links.title = 'Links'
+        self._style_button(self.btn_more_links)
+        self.btn_more_links.action = self._add_link
+        self.more_panel.add_subview(self.btn_more_links)
+
         self.left_button_items = [ui.ButtonItem(title='Cancel', action=self.cancel)]
         self.right_button_items = [ui.ButtonItem(title='Save', action=self.save)]
 
@@ -4650,6 +4867,34 @@ class NewEntryView(ui.View):
             _safe_push(self.navigation_view, picker)
         else:
             ui.NavigationView(picker).present('fullscreen')
+    def _toggle_more_panel(self, sender):
+        self.more_panel_visible = not self.more_panel_visible
+        self.more_panel.hidden = not self.more_panel_visible
+
+    def _edit_description(self, sender):
+        initial = self.description_text or ''
+        text = dialogs.text_dialog(title='Item description', text=initial)
+        if text is not None:
+            self.description_text = text
+
+    def _add_photo_note(self, sender):
+        note = dialogs.input_alert('Add photo note', 'Describe or reference the photo')
+        if note:
+            self.photos.append(note)
+
+    def _add_video_note(self, sender):
+        note = dialogs.input_alert('Add video note', 'Describe or reference the video')
+        if note:
+            self.videos.append(note)
+
+    def _add_link(self, sender):
+        label = dialogs.input_alert('Link label', 'Enter a label for this link')
+        if not label:
+            return
+        url = dialogs.input_alert('Link URL', 'Enter the URL')
+        if not url:
+            return
+        self.links.append({'label': label, 'url': url})
 
     def cancel(self, sender=None):
         if self.navigation_view: self.navigation_view.pop_view()
@@ -4660,22 +4905,23 @@ class NewEntryView(ui.View):
         if not title:
             dialogs.hud_alert('Please enter a name.', 'error', 1.0)
             return
-        if callable(self.on_save):
+        if self.on_save:
             self.on_save(
-                title=title,
-                hexc=self.selected_hex,
-                created_at=datetime.now().isoformat(),
-                due_at=self.due_at_iso
+                title,
+                self.selected_hex,
+                created_iso,
+                self.due_at_iso,
+                self.description_text,
+                list(self.photos),
+                list(self.videos),
+                list(self.links),
             )
-        self.cancel()
 
 
 # -------------------------
-# Table DataSource — custom “•••” pill, with sorting and groups
+# Table DataSource — custom “•••” pill, with sorting and group headers
 # -------------------------
-# -------------------------
-# Table DataSource — custom “•••” pill, with sorting and groups
-# -------------------------
+
 class _DescKey(object):
     """Wrapper so we can invert ordering per key rather than using reverse=."""
 
@@ -4696,7 +4942,7 @@ class TodoDataSource(object):
         self.group_spans = []
         self.refresh()
 
-    # ------------- filter helpers (same logic as before) -------------
+    # ------------- filter helpers -------------
 
     def _match_done(self, it):
         f = self.owner.filter_done
@@ -4799,12 +5045,13 @@ class TodoDataSource(object):
                 and self._match_created(it)
                 and self._match_due(it)):
                 pairs.append((idx, it))
-
+    
         mode1 = getattr(self.owner, 'sort_mode', SORT_MODE_MANUAL)
         dir1 = getattr(self.owner, 'sort_direction_primary', 'asc')
         mode2 = getattr(self.owner, 'sort_mode_2', SORT_MODE_CREATED)
         dir2 = getattr(self.owner, 'sort_direction_secondary', 'asc')
-
+    
+        # Pick correct grouping
         if mode1 == SORT_MODE_DUE_DATE:
             groups = self._groups_by_due_date(pairs, mode1, dir1, mode2, dir2)
         elif mode1 == SORT_MODE_CATEGORY:
@@ -4816,22 +5063,19 @@ class TodoDataSource(object):
         elif mode1 == SORT_MODE_STATUS:
             groups = self._groups_by_status(pairs, mode1, dir1, mode2, dir2)
         else:
-            # Manual: single flat list, no sections
+            # Manual (single flat list)
             pairs.sort(key=lambda p: self._key_pair(p, mode1, dir1, mode2, dir2))
-            self.filtered_indices = [idx for (idx, _it) in pairs]
-            self.group_spans = []
+            self.display_rows = [('item', idx) for (idx, _it) in pairs]
             return
-
-        # Flatten grouped pairs into filtered_indices and build spans
-        self.filtered_indices = []
-        self.group_spans = []
+    
+        # Build FLAT display rows: [('header', 'Label'), ('item', idx), ...]
+        self.display_rows = []
         for label, group_pairs in groups:
-            start = len(self.filtered_indices)
+            # Add header row
+            self.display_rows.append(('header', label))
+            # Add item rows
             for idx, _it in group_pairs:
-                self.filtered_indices.append(idx)
-            length = len(group_pairs)
-            if length:
-                self.group_spans.append((label, start, length))
+                self.display_rows.append(('item', idx))
 
     # ------------- grouping helpers -------------
 
@@ -4870,8 +5114,7 @@ class TodoDataSource(object):
         for d in list(later_by_date.keys()):
             sort_bucket(later_by_date[d])
 
-        # For "No due date" we still want created_at feel as primary,
-        # which is already the SORT_MODE_MANUAL / CREATED mapping when mode2 is set.
+        # "No due date" sorted by created_at then secondary key
         no_due.sort(
             key=lambda p: (
                 self._orient(parse_iso_or_now(p[1].get('created_at', '')), dir1),
@@ -5022,7 +5265,11 @@ class TodoDataSource(object):
     def _use_headers(self):
         mode = getattr(self.owner, 'sort_mode', SORT_MODE_MANUAL)
         show = getattr(self.owner, 'sort_show_headers', True)
-        return bool(show and self.group_spans and mode != SORT_MODE_MANUAL)
+    
+        # Must have groups OR Pythonista won't show anything
+        has_groups = bool(self.group_spans)
+    
+        return (show and has_groups and mode != SORT_MODE_MANUAL)
 
     def _item_for_position(self, section, row):
         """Return (item_dict, original_index) for a given table position."""
@@ -5036,63 +5283,70 @@ class TodoDataSource(object):
 
     # ------------- table view data source methods -------------
 
+    # Single section always
     def tableview_number_of_sections(self, tv):
-        return len(self.group_spans) if self._use_headers() else 1
-
+        return 1
+    
     def tableview_number_of_rows(self, tv, section):
-        if self._use_headers():
-            _label, _start, length = self.group_spans[section]
-            return length
-        return len(self.filtered_indices)
-
-    def tableview_title_for_header(self, tv, section):
-        """Fallback title so headers are definitely visible."""
-        if not self._use_headers():
-            return None
-        label, _start, _length = self.group_spans[section]
-        return label
-
+        return len(self.display_rows)
+    
+    # These must return 0 / None so UIKit never draws its own headers
     def tableview_view_for_header(self, tv, section):
-        if not self._use_headers():
-            return None
-        label, _start, _length = self.group_spans[section]
-        v = ui.View(bg_color=(0.96, 0.96, 0.98))
-        v.frame = (0, 0, tv.width, 26)
-        lbl = ui.Label(frame=(16, 2, tv.width - 32, 22), flex='W')
-        lbl.text = label
-        lbl.font = ('<System-Bold>', 14)
-        lbl.text_color = (0.15, 0.15, 0.2)
-        v.add_subview(lbl)
-        return v
-
+        return None
+    
     def tableview_height_for_header(self, tv, section):
-        return 26 if self._use_headers() else 0
-
+        return 0
+        
+        
+        
     def tableview_cell_for_row(self, tv, section, row):
+        kind, payload = self.display_rows[row]
+    
         cell = ui.TableViewCell()
-        item, orig_idx = self._item_for_position(section, row)
-
-        title = item['title']
+    
+        # -----------------------------
+        # HEADER ROW
+        # -----------------------------
+        if kind == 'header':
+            cell.background_color = (0.96, 0.96, 0.98)
+            cell.text_label.text = payload
+            cell.text_label.font = ('<System-Bold>', 14)
+            cell.text_label.text_color = 'black'
+            # Disable interaction
+            cell.selectable = False
+            return cell
+    
+        # -----------------------------
+        # ITEM ROW
+        # -----------------------------
+        orig_idx = payload
+        item = self.items[orig_idx]
+    
+        title = item.get('title', '')
         if item.get('done'):
             title = '✓ ' + title
             cell.text_label.alpha = 0.55
         else:
             cell.text_label.alpha = 1.0
         cell.text_label.text = title
-
+    
+        # Background + text colour
         hexc = item.get('color', '#8E8E93')
         try:
             cell.background_color = hex_to_ui_color(hexc)
-        except Exception:
+        except:
             cell.background_color = 'white'
             hexc = '#8E8E93'
+    
         fg = best_text_color_for_bg(hexc)
         cell.text_label.text_color = fg
-
+    
+        # Remove old "•••" buttons
         for sv in list(cell.content_view.subviews):
             if getattr(sv, 'name', '') == 'more_btn':
                 cell.content_view.remove_subview(sv)
-
+    
+        # Rebuild the "•••" button
         BTN_W, BTN_H = 36, 24
         btn = ui.Button(title='•••')
         btn.name = 'more_btn'
@@ -5106,9 +5360,36 @@ class TodoDataSource(object):
         y = int((cell.content_view.height - BTN_H) / 2)
         btn.frame = (x, y, BTN_W, BTN_H)
         btn.flex = 'L'
-        btn.action = (lambda s, sec=section, r=row: self._open_detail_for_row(tv, sec, r))
+        btn.action = (lambda s, idx=orig_idx: self._open_detail_direct(tv, idx))
         cell.content_view.add_subview(btn)
+    
         return cell
+        
+    def _open_detail_direct(self, tv, orig_idx):
+        item_ref = self.items[orig_idx]
+
+    def on_save(_updated):
+        save_items(self.items)
+        self.refresh()
+        tv.reload_data()
+
+    def on_cats_change(_cats):
+        self.owner.categories = _cats
+        self.owner._rebuild_filter_summary()
+        tv.reload_data()
+
+        detail = ItemDetailView(
+            item=item_ref,
+            categories=self.owner.categories,
+            on_save=on_save,
+            on_cats_change=on_cats_change
+        )
+
+        if self.owner.navigation_view:
+            _safe_push(self.owner.navigation_view, detail)
+        else:
+            ui.NavigationView(detail).present('fullscreen')
+
 
     def _open_detail_for_row(self, tv, section, row):
         item_ref, orig_idx = self._item_for_position(section, row)
@@ -5131,26 +5412,30 @@ class TodoDataSource(object):
             ui.NavigationView(detail).present('fullscreen')
 
     def tableview_can_delete(self, tv, section, row):
-        return True
+        kind, payload = self.display_rows[row]
+        return (kind == 'item')
 
     def tableview_delete(self, tv, section, row):
-        try:
-            _item, orig_idx = self._item_for_position(section, row)
-            del self.items[orig_idx]
-            save_items(self.items)
-        finally:
-            self.refresh()
-            tv.reload_data()
-
+        kind, payload = self.display_rows[row]
+        if kind != 'item':
+            return
+        del self.items[payload]
+        save_items(self.items)
+        self.refresh()
+        tv.reload_data()
+    
     def tableview_did_select(self, tv, section, row):
-        it, orig_idx = self._item_for_position(section, row)
-        new_done = not it.get('done')
-        it['done'] = new_done
+        kind, payload = self.display_rows[row]
+        if kind != 'item':
+            return
+    
+        it = self.items[payload]
+        it['done'] = not it.get('done')
         save_items(self.items)
         haptic_success()
         self.refresh()
         tv.reload_data()
-
+    
 # -------------------------
 # Main App View
 # -------------------------
@@ -5303,6 +5588,10 @@ class TodoApp(ui.View):
         self.plus_btn.tint_color = (0, 0, 0)
         self.plus_btn.font = ('<System-Bold>', 47)
         self.add_subview(self.plus_btn)
+        
+        # Force group generation before first render
+        self.ds.refresh()
+        self.table.reload_data()
 
     def _make_btn(self, title, action):
         b = ui.Button()
@@ -5406,6 +5695,28 @@ class TodoApp(ui.View):
             x += 24
         self.chip_bar_btn.frame = (0, 0, max(x, 44), size)
         
+    def _tint_section_headers(self):
+        """Force default iOS section headers to be black."""
+        try:
+            tv = ObjCInstance(self.table)
+            UIColor = ObjCClass('UIColor')
+            black = UIColor.blackColor()
+
+            sections = tv.numberOfSections()
+            for i in range(sections):
+                header = tv.headerViewForSection_(i)
+                if header:
+                    label = header.textLabel()
+                    if label:
+                        label.setTextColor_(black)
+        except Exception:
+            pass
+
+    def _reload_and_tint(self):
+        """Reload table then recolor headers once UIKit creates them."""
+        self.table.reload_data()
+        ui.delay(self._tint_section_headers, 0.01)
+        
     def _sort_summary(self):
         label_map = {
             SORT_MODE_MANUAL:   'Manual',
@@ -5433,7 +5744,8 @@ class TodoApp(ui.View):
                 b.border_color = (0.8, 0.8, 0.85)
         self.ds.refresh()
         self._rebuild_filter_summary()
-        self.table.reload_data()
+        self._reload_and_tint()
+        self._tint_section_headers()
 
     def _apply_sort_settings(self, settings, set_as_default=False):
         """Receive settings from Sort panel and refresh list."""
@@ -5447,7 +5759,8 @@ class TodoApp(ui.View):
             settings.save_to_disk()
         self.ds.refresh()
         self._rebuild_filter_summary()
-        self.table.reload_data()
+        self._reload_and_tint()
+        self._tint_section_headers()
 
     def action_sort(self, sender):
         """Open Sort panel."""
@@ -5502,13 +5815,23 @@ class TodoApp(ui.View):
         self.filter_category_hexes.clear()
         self.ds.refresh()
         self._rebuild_filter_summary()
-        self.table.reload_data()
+        self._reload_and_tint()
         dialogs.hud_alert('Color filter cleared', 'success', 0.6)
 
     def action_add(self, sender):
-        def on_save(title, hexc, created_at, due_at):
-            self.items.append({'title': title, 'done': False, 'color': hexc,
-                               'created_at': created_at, 'due_at': due_at})
+        def on_save(title, hexc, created_at, due_at,
+                   description, photos, videos, links):
+            self.items.append({
+                'title': title,
+                'done': False,
+                'color': hexc,
+                'created_at': created_at,
+                'due_at': due_at,
+                'description': description or '',
+                'photos': photos or [],
+                'videos': videos or [],
+                'links': links or [],
+            })
             save_items(self.items)
             self.ds.items = self.items
             self.ds.refresh()
